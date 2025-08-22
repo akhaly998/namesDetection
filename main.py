@@ -11,6 +11,8 @@ import arabic_reshaper
 from bidi.algorithm import get_display
 import jellyfish
 from rapidfuzz import fuzz as rapidfuzz_fuzz, process as rapidfuzz_process
+from functools import lru_cache
+import hashlib
 
 app = FastAPI(
     title="Names Detection API",
@@ -23,8 +25,9 @@ class ArabicTextProcessor:
     """Advanced Arabic text processing for name similarity detection"""
     
     @staticmethod
+    @lru_cache(maxsize=1000)
     def normalize_arabic_text(text: str) -> str:
-        """Comprehensive Arabic text normalization"""
+        """Comprehensive Arabic text normalization with caching"""
         if not text:
             return ""
         
@@ -52,19 +55,21 @@ class ArabicTextProcessor:
         return text
     
     @staticmethod
-    def get_arabic_tokens(text: str) -> List[str]:
-        """Extract meaningful Arabic tokens from text"""
+    @lru_cache(maxsize=500)
+    def get_arabic_tokens(text: str) -> tuple:
+        """Extract meaningful Arabic tokens from text with caching"""
         normalized = ArabicTextProcessor.normalize_arabic_text(text)
         tokens = normalized.split()
         
         # Filter out very short tokens (less than 2 characters)
-        meaningful_tokens = [token for token in tokens if len(token) >= 2]
+        meaningful_tokens = tuple(token for token in tokens if len(token) >= 2)
         
         return meaningful_tokens
     
     @staticmethod
+    @lru_cache(maxsize=500)
     def get_phonetic_code(text: str) -> str:
-        """Generate phonetic code for Arabic text"""
+        """Generate phonetic code for Arabic text with caching"""
         # Normalize first
         normalized = ArabicTextProcessor.normalize_arabic_text(text)
         
@@ -80,7 +85,7 @@ class ArabicTextProcessor:
         return normalized
 
 class SimilarityCalculator:
-    """Advanced similarity calculation for Arabic names"""
+    """Advanced similarity calculation for Arabic names with caching"""
     
     def __init__(self):
         self.weights = {
@@ -92,9 +97,21 @@ class SimilarityCalculator:
             'phonetic': 0.75,
             'ratio': 0.60
         }
+        # Cache for similarity calculations
+        self._similarity_cache = {}
+    
+    def _get_cache_key(self, name1: str, name2: str) -> str:
+        """Generate cache key for similarity calculation"""
+        combined = f"{name1}|{name2}"
+        return hashlib.md5(combined.encode()).hexdigest()
     
     def calculate_comprehensive_similarity(self, name1: str, name2: str) -> Dict[str, float]:
-        """Calculate multiple similarity scores for Arabic names"""
+        """Calculate multiple similarity scores for Arabic names with caching"""
+        
+        # Check cache first
+        cache_key = self._get_cache_key(name1, name2)
+        if cache_key in self._similarity_cache:
+            return self._similarity_cache[cache_key]
         
         # Normalize both names
         norm1 = ArabicTextProcessor.normalize_arabic_text(name1)
@@ -134,6 +151,16 @@ class SimilarityCalculator:
             scores['token_avg'] = sum(token_scores) / len(token_scores) if token_scores else 0
         else:
             scores['token_avg'] = 0
+        
+        # Cache the result
+        self._similarity_cache[cache_key] = scores
+        
+        # Keep cache size reasonable
+        if len(self._similarity_cache) > 10000:
+            # Remove oldest entries (simple FIFO)
+            keys_to_remove = list(self._similarity_cache.keys())[:1000]
+            for key in keys_to_remove:
+                del self._similarity_cache[key]
         
         return scores
     
@@ -181,9 +208,38 @@ class Config:
     ENABLE_PHONETIC_MATCHING = True
     ENABLE_TOKEN_MATCHING = True
 
+# Performance monitoring
+class PerformanceMonitor:
+    def __init__(self):
+        self.reset_stats()
+    
+    def reset_stats(self):
+        self.total_requests = 0
+        self.cache_hits = 0
+        self.total_comparisons = 0
+        self.avg_processing_time = 0
+    
+    def record_request(self, comparisons: int, cache_hit: bool = False):
+        self.total_requests += 1
+        self.total_comparisons += comparisons
+        if cache_hit:
+            self.cache_hits += 1
+    
+    def get_stats(self):
+        cache_hit_rate = (self.cache_hits / self.total_requests * 100) if self.total_requests > 0 else 0
+        avg_comparisons = self.total_comparisons / self.total_requests if self.total_requests > 0 else 0
+        
+        return {
+            "total_requests": self.total_requests,
+            "cache_hit_rate": round(cache_hit_rate, 2),
+            "average_comparisons_per_request": round(avg_comparisons, 2),
+            "total_comparisons": self.total_comparisons
+        }
+
 # Initialize components
 arabic_processor = ArabicTextProcessor()
 similarity_calculator = SimilarityCalculator()
+performance_monitor = PerformanceMonitor()
 
 # Load blacklist from CSV
 def load_blacklist():
@@ -250,7 +306,8 @@ async def root():
             "GET /blacklist": "Get the current blacklist",
             "GET /config": "Get current API configuration",
             "POST /config": "Update API configuration",
-            "GET /health": "Health check and system status"
+            "GET /health": "Health check and system status",
+            "GET /stats": "Performance statistics and cache information"
         }
     }
 
@@ -260,7 +317,30 @@ async def health_check():
     return {
         "status": "healthy",
         "blacklist_loaded": len(BLACKLIST) > 0,
-        "blacklist_count": len(BLACKLIST)
+        "blacklist_count": len(BLACKLIST),
+        "cache_info": {
+            "normalization_cache_size": arabic_processor.normalize_arabic_text.cache_info()._asdict(),
+            "tokens_cache_size": arabic_processor.get_arabic_tokens.cache_info()._asdict(),
+            "phonetic_cache_size": arabic_processor.get_phonetic_code.cache_info()._asdict()
+        }
+    }
+
+@app.get("/stats")
+async def get_performance_stats():
+    """Get performance statistics"""
+    return {
+        "performance": performance_monitor.get_stats(),
+        "cache_stats": {
+            "text_normalization": arabic_processor.normalize_arabic_text.cache_info()._asdict(),
+            "token_extraction": arabic_processor.get_arabic_tokens.cache_info()._asdict(),
+            "phonetic_coding": arabic_processor.get_phonetic_code.cache_info()._asdict(),
+            "similarity_cache_size": len(similarity_calculator._similarity_cache)
+        },
+        "configuration": {
+            "min_threshold": Config.MIN_SIMILARITY_THRESHOLD,
+            "suspicious_threshold": Config.SUSPICIOUS_THRESHOLD,
+            "max_results": Config.MAX_RESULTS
+        }
     }
 
 @app.get("/blacklist")
@@ -335,6 +415,9 @@ async def check_name(request: NameCheckRequest):
         "above_threshold": "0",
         "processing_method": "advanced_arabic_nlp"
     }
+    
+    # Record performance metrics
+    performance_monitor.record_request(len(BLACKLIST))
     
     for blacklisted_name in BLACKLIST:
         # Calculate comprehensive similarity
