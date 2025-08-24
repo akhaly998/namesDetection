@@ -1,19 +1,47 @@
-# Names Detection API
+# Professional Arabic Names Detection API
 
-An Arabic name similarity detection system built with FastAPI that checks names against a blacklist and returns similarity percentages.
+An advanced Arabic name similarity detection system built with FastAPI that uses sophisticated text processing and multiple similarity algorithms to check names against a comprehensive blacklist.
 
 ## Description
 
-This API allows you to check if a given Arabic name is similar to any name in a predefined blacklist. It uses fuzzy string matching algorithms to calculate similarity percentages and determine if a name should be considered suspicious.
+This professional-grade API provides comprehensive Arabic name similarity detection with advanced features designed specifically for Arabic text processing. It uses state-of-the-art natural language processing techniques to handle the complexities of Arabic script, including diacritics, text normalization, phonetic matching, and various spelling variations.
 
-## Features
+## Key Features
 
-- **FastAPI-based REST API** with automatic documentation
-- **Arabic text support** for name matching
-- **Multiple similarity algorithms** (ratio, partial ratio, token sort, token set)
-- **Configurable similarity thresholds**
-- **CSV-based blacklist** for easy management
-- **Multiple endpoints** for different use cases
+- **Advanced Arabic Text Processing** with proper normalization and diacritics handling
+- **Multiple Similarity Algorithms** including phonetic, token-based, and fuzzy matching
+- **Weighted Scoring System** for more accurate similarity assessment
+- **Configurable Thresholds** for fine-tuning detection sensitivity
+- **Comprehensive Blacklist** with 39+ carefully curated names
+- **Confidence Level Assessment** for reliability evaluation
+- **Real-time Configuration** management via API endpoints
+- **Detailed Similarity Analysis** with breakdown of different matching methods
+- **Performance Optimized** for production environments
+- **Professional API Design** with comprehensive documentation
+
+## Technical Improvements
+
+### Arabic Text Normalization
+- Automatic diacritics (tashkeel) removal
+- Alef form normalization (أ، إ، آ → ا)
+- Teh marbuta normalization (ة → ه)
+- Tatweel (kashida) removal
+- Extra whitespace cleanup
+- Non-Arabic character filtering
+
+### Advanced Similarity Algorithms
+- **Exact Matching**: Perfect character-by-character comparison
+- **Normalized Matching**: Comparison after Arabic text normalization
+- **Token-based Analysis**: Individual word/token comparison
+- **Phonetic Matching**: Sound-based similarity for Arabic names
+- **Fuzzy String Matching**: Multiple fuzzy algorithms (ratio, partial, token sort/set)
+- **Weighted Final Score**: Intelligent combination of all similarity metrics
+
+### Configuration Management
+- Adjustable similarity thresholds
+- Configurable suspicious detection levels
+- Customizable result limits
+- Runtime configuration updates
 
 ## Installation
 
@@ -27,6 +55,26 @@ cd namesDetection
 ```bash
 pip install -r requirements.txt
 ```
+
+3. Start the server:
+```bash
+python main.py
+```
+
+The server will start on `http://localhost:8000`
+
+## Dependencies
+
+- **FastAPI**: Modern web framework for building APIs
+- **Uvicorn**: Lightning-fast ASGI server
+- **PyArabic**: Comprehensive Arabic text processing
+- **Arabic Reshaper**: Proper Arabic text rendering
+- **Python-BIDI**: Bidirectional text support
+- **Jellyfish**: Advanced phonetic matching algorithms
+- **RapidFuzz**: High-performance fuzzy string matching
+- **FuzzyWuzzy**: Traditional fuzzy string matching
+- **Python-Levenshtein**: Fast string distance calculations
+- **Pandas**: Efficient data handling for blacklist management
 
 ## Usage
 

@@ -3,21 +3,262 @@ from pydantic import BaseModel
 from fuzzywuzzy import fuzz, process
 import pandas as pd
 import os
-from typing import List, Dict
+import re
+import unicodedata
+from typing import List, Dict, Optional
+import pyarabic.araby as araby
+import arabic_reshaper
+from bidi.algorithm import get_display
+import jellyfish
+from rapidfuzz import fuzz as rapidfuzz_fuzz, process as rapidfuzz_process
+from functools import lru_cache
+import hashlib
 
 app = FastAPI(
     title="Names Detection API",
-    description="API for checking name similarity against a blacklist",
-    version="1.0.0"
+    description="Professional Arabic name similarity detection system with advanced text processing",
+    version="2.0.0"
 )
+
+# Arabic text processing utilities
+class ArabicTextProcessor:
+    """Advanced Arabic text processing for name similarity detection"""
+    
+    @staticmethod
+    @lru_cache(maxsize=1000)
+    def normalize_arabic_text(text: str) -> str:
+        """Comprehensive Arabic text normalization with caching"""
+        if not text:
+            return ""
+        
+        # Remove extra whitespace
+        text = re.sub(r'\s+', ' ', text.strip())
+        
+        # Remove diacritics (tashkeel)
+        text = araby.strip_diacritics(text)
+        
+        # Normalize different forms of alef
+        text = araby.normalize_alef(text)
+        
+        # Normalize different forms of teh marbuta and heh
+        text = araby.normalize_teh(text)
+        
+        # Remove tatweel (kashida) - elongation character
+        text = araby.strip_tatweel(text)
+        
+        # Remove non-Arabic characters except spaces
+        text = re.sub(r'[^\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\s]', '', text)
+        
+        # Normalize whitespace again
+        text = re.sub(r'\s+', ' ', text.strip())
+        
+        return text
+    
+    @staticmethod
+    @lru_cache(maxsize=500)
+    def get_arabic_tokens(text: str) -> tuple:
+        """Extract meaningful Arabic tokens from text with caching"""
+        normalized = ArabicTextProcessor.normalize_arabic_text(text)
+        tokens = normalized.split()
+        
+        # Filter out very short tokens (less than 2 characters)
+        meaningful_tokens = tuple(token for token in tokens if len(token) >= 2)
+        
+        return meaningful_tokens
+    
+    @staticmethod
+    @lru_cache(maxsize=500)
+    def get_phonetic_code(text: str) -> str:
+        """Generate phonetic code for Arabic text with caching"""
+        # Normalize first
+        normalized = ArabicTextProcessor.normalize_arabic_text(text)
+        
+        # Simple Arabic phonetic mapping for similar sounds
+        phonetic_map = {
+            'ث': 'س', 'ذ': 'ز', 'ص': 'س', 'ض': 'د', 'ط': 'ت', 'ظ': 'ز',
+            'ئ': 'ء', 'إ': 'ا', 'أ': 'ا', 'آ': 'ا', 'ة': 'ه'
+        }
+        
+        for arabic_char, replacement in phonetic_map.items():
+            normalized = normalized.replace(arabic_char, replacement)
+        
+        return normalized
+
+class SimilarityCalculator:
+    """Advanced similarity calculation for Arabic names with caching"""
+    
+    def __init__(self):
+        self.weights = {
+            'exact_match': 1.0,
+            'normalized_match': 0.98,
+            'token_set': 0.90,
+            'token_sort': 0.85,
+            'partial': 0.70,
+            'phonetic': 0.75,
+            'ratio': 0.60
+        }
+        # Cache for similarity calculations
+        self._similarity_cache = {}
+    
+    def _get_cache_key(self, name1: str, name2: str) -> str:
+        """Generate cache key for similarity calculation"""
+        combined = f"{name1}|{name2}"
+        return hashlib.md5(combined.encode()).hexdigest()
+    
+    def calculate_comprehensive_similarity(self, name1: str, name2: str) -> Dict[str, float]:
+        """Calculate multiple similarity scores for Arabic names with caching"""
+        
+        # Check cache first
+        cache_key = self._get_cache_key(name1, name2)
+        if cache_key in self._similarity_cache:
+            return self._similarity_cache[cache_key]
+        
+        # Normalize both names
+        norm1 = ArabicTextProcessor.normalize_arabic_text(name1)
+        norm2 = ArabicTextProcessor.normalize_arabic_text(name2)
+        
+        # Get tokens
+        tokens1 = ArabicTextProcessor.get_arabic_tokens(name1)
+        tokens2 = ArabicTextProcessor.get_arabic_tokens(name2)
+        
+        # Get phonetic codes
+        phone1 = ArabicTextProcessor.get_phonetic_code(name1)
+        phone2 = ArabicTextProcessor.get_phonetic_code(name2)
+        
+        scores = {}
+        
+        # Exact match
+        scores['exact'] = 100.0 if name1 == name2 else 0.0
+        
+        # Normalized match
+        scores['normalized'] = 100.0 if norm1 == norm2 else 0.0
+        
+        # Traditional fuzzy matching on normalized text
+        scores['ratio'] = rapidfuzz_fuzz.ratio(norm1, norm2)
+        scores['partial_ratio'] = rapidfuzz_fuzz.partial_ratio(norm1, norm2)
+        scores['token_sort_ratio'] = rapidfuzz_fuzz.token_sort_ratio(norm1, norm2)
+        scores['token_set_ratio'] = rapidfuzz_fuzz.token_set_ratio(norm1, norm2)
+        
+        # Phonetic similarity
+        scores['phonetic'] = rapidfuzz_fuzz.ratio(phone1, phone2)
+        
+        # Token-based similarity
+        if tokens1 and tokens2:
+            token_scores = []
+            for token1 in tokens1:
+                best_token_score = max([rapidfuzz_fuzz.ratio(token1, token2) for token2 in tokens2], default=0)
+                token_scores.append(best_token_score)
+            scores['token_avg'] = sum(token_scores) / len(token_scores) if token_scores else 0
+        else:
+            scores['token_avg'] = 0
+        
+        # Cache the result
+        self._similarity_cache[cache_key] = scores
+        
+        # Keep cache size reasonable
+        if len(self._similarity_cache) > 10000:
+            # Remove oldest entries (simple FIFO)
+            keys_to_remove = list(self._similarity_cache.keys())[:1000]
+            for key in keys_to_remove:
+                del self._similarity_cache[key]
+        
+        return scores
+    
+    def get_weighted_similarity(self, scores: Dict[str, float]) -> float:
+        """Calculate weighted final similarity score"""
+        
+        # Use the best scores with appropriate weights
+        weighted_score = 0
+        total_weight = 0
+        
+        # Prioritize exact and normalized matches
+        if scores.get('exact', 0) > 0:
+            return scores['exact']
+        
+        if scores.get('normalized', 0) > 0:
+            return scores['normalized'] * self.weights['normalized_match']
+        
+        # Calculate weighted average of other scores
+        score_weights = [
+            (scores.get('token_set_ratio', 0), self.weights['token_set']),
+            (scores.get('token_sort_ratio', 0), self.weights['token_sort']),
+            (scores.get('partial_ratio', 0), self.weights['partial']),
+            (scores.get('phonetic', 0), self.weights['phonetic']),
+            (scores.get('ratio', 0), self.weights['ratio']),
+            (scores.get('token_avg', 0), 0.75)  # Token average weight
+        ]
+        
+        for score, weight in score_weights:
+            if score > 0:
+                weighted_score += score * weight
+                total_weight += weight
+        
+        if total_weight > 0:
+            final_score = weighted_score / total_weight
+        else:
+            final_score = max(scores.values()) if scores else 0
+        
+        return round(final_score, 2)
+
+# Configuration
+class Config:
+    MIN_SIMILARITY_THRESHOLD = 65
+    SUSPICIOUS_THRESHOLD = 75
+    MAX_RESULTS = 10
+    ENABLE_PHONETIC_MATCHING = True
+    ENABLE_TOKEN_MATCHING = True
+
+# Performance monitoring
+class PerformanceMonitor:
+    def __init__(self):
+        self.reset_stats()
+    
+    def reset_stats(self):
+        self.total_requests = 0
+        self.cache_hits = 0
+        self.total_comparisons = 0
+        self.avg_processing_time = 0
+    
+    def record_request(self, comparisons: int, cache_hit: bool = False):
+        self.total_requests += 1
+        self.total_comparisons += comparisons
+        if cache_hit:
+            self.cache_hits += 1
+    
+    def get_stats(self):
+        cache_hit_rate = (self.cache_hits / self.total_requests * 100) if self.total_requests > 0 else 0
+        avg_comparisons = self.total_comparisons / self.total_requests if self.total_requests > 0 else 0
+        
+        return {
+            "total_requests": self.total_requests,
+            "cache_hit_rate": round(cache_hit_rate, 2),
+            "average_comparisons_per_request": round(avg_comparisons, 2),
+            "total_comparisons": self.total_comparisons
+        }
+
+# Initialize components
+arabic_processor = ArabicTextProcessor()
+similarity_calculator = SimilarityCalculator()
+performance_monitor = PerformanceMonitor()
 
 # Load blacklist from CSV
 def load_blacklist():
-    """Load blacklist names from CSV file"""
+    """Load and normalize blacklist names from CSV file"""
     csv_path = os.path.join(os.path.dirname(__file__), "blacklist.csv")
     try:
         df = pd.read_csv(csv_path)
-        return df['name'].tolist()
+        names = df['name'].tolist()
+        
+        # Normalize all blacklist names for better matching
+        normalized_names = []
+        for name in names:
+            if name and isinstance(name, str):
+                normalized = arabic_processor.normalize_arabic_text(name)
+                if normalized:  # Only add non-empty normalized names
+                    normalized_names.append(name)  # Keep original name for display
+        
+        print(f"Loaded {len(normalized_names)} names from blacklist")
+        return normalized_names
     except Exception as e:
         print(f"Error loading blacklist: {e}")
         return []
@@ -27,27 +268,46 @@ BLACKLIST = load_blacklist()
 
 class NameCheckRequest(BaseModel):
     name: str
-
+    
 class SimilarityResult(BaseModel):
     blacklisted_name: str
     similarity_percentage: float
+    similarity_details: Optional[Dict[str, float]] = None
+    normalized_input: Optional[str] = None
+    normalized_blacklist: Optional[str] = None
 
 class NameCheckResponse(BaseModel):
     input_name: str
+    normalized_input: str
     is_suspicious: bool
     max_similarity: float
+    confidence_level: str
     matches: List[SimilarityResult]
+    processing_info: Dict[str, str] = {}
 
 @app.get("/")
 async def root():
     """Root endpoint with API information"""
     return {
-        "message": "Names Detection API",
-        "description": "Check name similarity against blacklist",
+        "message": "Professional Arabic Names Detection API",
+        "description": "Advanced Arabic name similarity detection with comprehensive text processing",
+        "version": "2.0.0",
+        "features": [
+            "Arabic text normalization and diacritics handling",
+            "Phonetic similarity matching",
+            "Token-based analysis",
+            "Weighted similarity scoring",
+            "Multiple similarity algorithms",
+            "Confidence level assessment"
+        ],
         "endpoints": {
-            "POST /check-name": "Check a name against the blacklist",
+            "POST /check-name": "Comprehensive name analysis with detailed scoring",
+            "POST /check-name-simple": "Quick name check with enhanced processing",
             "GET /blacklist": "Get the current blacklist",
-            "GET /health": "Health check"
+            "GET /config": "Get current API configuration",
+            "POST /config": "Update API configuration",
+            "GET /health": "Health check and system status",
+            "GET /stats": "Performance statistics and cache information"
         }
     }
 
@@ -57,7 +317,30 @@ async def health_check():
     return {
         "status": "healthy",
         "blacklist_loaded": len(BLACKLIST) > 0,
-        "blacklist_count": len(BLACKLIST)
+        "blacklist_count": len(BLACKLIST),
+        "cache_info": {
+            "normalization_cache_size": arabic_processor.normalize_arabic_text.cache_info()._asdict(),
+            "tokens_cache_size": arabic_processor.get_arabic_tokens.cache_info()._asdict(),
+            "phonetic_cache_size": arabic_processor.get_phonetic_code.cache_info()._asdict()
+        }
+    }
+
+@app.get("/stats")
+async def get_performance_stats():
+    """Get performance statistics"""
+    return {
+        "performance": performance_monitor.get_stats(),
+        "cache_stats": {
+            "text_normalization": arabic_processor.normalize_arabic_text.cache_info()._asdict(),
+            "token_extraction": arabic_processor.get_arabic_tokens.cache_info()._asdict(),
+            "phonetic_coding": arabic_processor.get_phonetic_code.cache_info()._asdict(),
+            "similarity_cache_size": len(similarity_calculator._similarity_cache)
+        },
+        "configuration": {
+            "min_threshold": Config.MIN_SIMILARITY_THRESHOLD,
+            "suspicious_threshold": Config.SUSPICIOUS_THRESHOLD,
+            "max_results": Config.MAX_RESULTS
+        }
     }
 
 @app.get("/blacklist")
@@ -68,11 +351,50 @@ async def get_blacklist():
         "count": len(BLACKLIST)
     }
 
+@app.get("/config")
+async def get_config():
+    """Get current API configuration"""
+    return {
+        "min_similarity_threshold": Config.MIN_SIMILARITY_THRESHOLD,
+        "suspicious_threshold": Config.SUSPICIOUS_THRESHOLD,
+        "max_results": Config.MAX_RESULTS,
+        "enable_phonetic_matching": Config.ENABLE_PHONETIC_MATCHING,
+        "enable_token_matching": Config.ENABLE_TOKEN_MATCHING,
+        "similarity_weights": similarity_calculator.weights
+    }
+
+@app.post("/config")
+async def update_config(config_update: dict):
+    """Update API configuration (for fine-tuning)"""
+    updated_fields = []
+    
+    if "min_similarity_threshold" in config_update:
+        Config.MIN_SIMILARITY_THRESHOLD = max(0, min(100, config_update["min_similarity_threshold"]))
+        updated_fields.append("min_similarity_threshold")
+    
+    if "suspicious_threshold" in config_update:
+        Config.SUSPICIOUS_THRESHOLD = max(0, min(100, config_update["suspicious_threshold"]))
+        updated_fields.append("suspicious_threshold")
+    
+    if "max_results" in config_update:
+        Config.MAX_RESULTS = max(1, min(50, config_update["max_results"]))
+        updated_fields.append("max_results")
+    
+    return {
+        "message": "Configuration updated successfully",
+        "updated_fields": updated_fields,
+        "current_config": {
+            "min_similarity_threshold": Config.MIN_SIMILARITY_THRESHOLD,
+            "suspicious_threshold": Config.SUSPICIOUS_THRESHOLD,
+            "max_results": Config.MAX_RESULTS
+        }
+    }
+
 @app.post("/check-name", response_model=NameCheckResponse)
 async def check_name(request: NameCheckRequest):
     """
-    Check if a name is similar to any name in the blacklist
-    Returns similarity percentages for all matches above threshold
+    Professional Arabic name similarity detection with advanced text processing
+    Returns comprehensive similarity analysis with detailed scoring
     """
     if not BLACKLIST:
         raise HTTPException(status_code=500, detail="Blacklist not loaded")
@@ -81,44 +403,76 @@ async def check_name(request: NameCheckRequest):
     if not input_name:
         raise HTTPException(status_code=400, detail="Name cannot be empty")
     
-    # Calculate similarity with each blacklisted name
+    # Normalize input name
+    normalized_input = arabic_processor.normalize_arabic_text(input_name)
+    if not normalized_input:
+        raise HTTPException(status_code=400, detail="Invalid Arabic name provided")
+    
+    # Calculate similarities with each blacklisted name
     similarities = []
-    threshold = 60  # Minimum similarity percentage to consider
+    processing_stats = {
+        "total_comparisons": str(len(BLACKLIST)),
+        "above_threshold": "0",
+        "processing_method": "advanced_arabic_nlp"
+    }
+    
+    # Record performance metrics
+    performance_monitor.record_request(len(BLACKLIST))
     
     for blacklisted_name in BLACKLIST:
-        # Use different similarity algorithms
-        ratio = fuzz.ratio(input_name, blacklisted_name)
-        partial_ratio = fuzz.partial_ratio(input_name, blacklisted_name)
-        token_sort_ratio = fuzz.token_sort_ratio(input_name, blacklisted_name)
-        token_set_ratio = fuzz.token_set_ratio(input_name, blacklisted_name)
+        # Calculate comprehensive similarity
+        similarity_scores = similarity_calculator.calculate_comprehensive_similarity(
+            normalized_input, blacklisted_name
+        )
         
-        # Take the maximum similarity score
-        max_similarity = max(ratio, partial_ratio, token_sort_ratio, token_set_ratio)
+        # Get weighted final score
+        final_score = similarity_calculator.get_weighted_similarity(similarity_scores)
         
-        if max_similarity >= threshold:
+        if final_score >= Config.MIN_SIMILARITY_THRESHOLD:
+            current_above = int(processing_stats["above_threshold"])
+            processing_stats["above_threshold"] = str(current_above + 1)
+            
             similarities.append(SimilarityResult(
                 blacklisted_name=blacklisted_name,
-                similarity_percentage=round(max_similarity, 2)
+                similarity_percentage=final_score,
+                similarity_details=similarity_scores,
+                normalized_input=normalized_input,
+                normalized_blacklist=arabic_processor.normalize_arabic_text(blacklisted_name)
             ))
     
     # Sort by similarity percentage (descending)
     similarities.sort(key=lambda x: x.similarity_percentage, reverse=True)
     
-    # Determine if suspicious (similarity >= 70%)
+    # Determine suspicion level and confidence
     max_sim = similarities[0].similarity_percentage if similarities else 0
-    is_suspicious = max_sim >= 70
+    is_suspicious = max_sim >= Config.SUSPICIOUS_THRESHOLD
+    
+    # Determine confidence level
+    if max_sim >= 95:
+        confidence = "very_high"
+    elif max_sim >= 85:
+        confidence = "high"
+    elif max_sim >= 70:
+        confidence = "medium"
+    elif max_sim >= 60:
+        confidence = "low"
+    else:
+        confidence = "very_low"
     
     return NameCheckResponse(
         input_name=input_name,
+        normalized_input=normalized_input,
         is_suspicious=is_suspicious,
         max_similarity=max_sim,
-        matches=similarities[:10]  # Return top 10 matches
+        confidence_level=confidence,
+        matches=similarities[:Config.MAX_RESULTS],
+        processing_info=processing_stats
     )
 
 @app.post("/check-name-simple")
 async def check_name_simple(request: NameCheckRequest):
     """
-    Simple endpoint that returns just the highest similarity match
+    Simple endpoint with enhanced Arabic processing that returns the best match
     """
     if not BLACKLIST:
         raise HTTPException(status_code=500, detail="Blacklist not loaded")
@@ -127,26 +481,34 @@ async def check_name_simple(request: NameCheckRequest):
     if not input_name:
         raise HTTPException(status_code=400, detail="Name cannot be empty")
     
-    # Find the best match
-    best_match = process.extractOne(input_name, BLACKLIST, scorer=fuzz.token_set_ratio)
+    # Normalize input
+    normalized_input = arabic_processor.normalize_arabic_text(input_name)
     
-    if best_match:
-        similarity = best_match[1]
-        matched_name = best_match[0]
+    # Find best match using advanced similarity
+    best_score = 0
+    best_match = None
+    best_details = {}
+    
+    for blacklisted_name in BLACKLIST:
+        similarity_scores = similarity_calculator.calculate_comprehensive_similarity(
+            normalized_input, blacklisted_name
+        )
+        final_score = similarity_calculator.get_weighted_similarity(similarity_scores)
         
-        return {
-            "input_name": input_name,
-            "matched_name": matched_name,
-            "similarity_percentage": similarity,
-            "is_suspicious": similarity >= 70
-        }
-    else:
-        return {
-            "input_name": input_name,
-            "matched_name": None,
-            "similarity_percentage": 0,
-            "is_suspicious": False
-        }
+        if final_score > best_score:
+            best_score = final_score
+            best_match = blacklisted_name
+            best_details = similarity_scores
+    
+    return {
+        "input_name": input_name,
+        "normalized_input": normalized_input,
+        "matched_name": best_match,
+        "similarity_percentage": round(best_score, 2),
+        "is_suspicious": best_score >= Config.SUSPICIOUS_THRESHOLD,
+        "confidence_level": "high" if best_score >= 85 else "medium" if best_score >= 70 else "low",
+        "similarity_details": best_details
+    }
 
 if __name__ == "__main__":
     import uvicorn

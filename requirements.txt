@@ -5,3 +5,8 @@ fuzzywuzzy==0.18.0
 python-levenshtein==0.23.0
 pandas==2.1.4
 requests==2.31.0
+pyarabic==0.6.15
+arabic-reshaper==3.0.0
+python-bidi==0.4.2
+jellyfish==0.11.2
+rapidfuzz==3.6.1
