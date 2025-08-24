@@ -930,14 +930,6 @@ async def get_performance_stats():
         }
     }
 
-@app.get("/blacklist")
-async def get_blacklist():
-    """Get the current blacklist"""
-    return {
-        "blacklist": BLACKLIST,
-        "count": len(BLACKLIST)
-    }
-
 @app.get("/config")
 async def get_config():
     """Get current API configuration"""
@@ -1163,15 +1155,15 @@ async def check_names_batch(request: BatchNameCheckRequest):
     # Calculate similarities with each blacklisted name
     similarities = []
     processing_stats = {
-        "total_comparisons": str(len(BLACKLIST)),
+        "total_comparisons": str(len(blacklist_manager.get_blacklist())),
         "above_threshold": "0",
         "processing_method": "advanced_arabic_nlp"
     }
     
     # Record performance metrics
-    performance_monitor.record_request(len(BLACKLIST))
+    performance_monitor.record_request(len(blacklist_manager.get_blacklist()))
     
-    for blacklisted_name in BLACKLIST:
+    for blacklisted_name in blacklist_manager.get_blacklist():
         # Calculate comprehensive similarity
         similarity_scores = similarity_calculator.calculate_comprehensive_similarity(
             normalized_input, blacklisted_name
